@@ -472,6 +472,60 @@ HANDLER(h_pxor_x_x) {
     NEXT;
 }
 
+// Scalar double arithmetic, compares and conversions: what a JavaScript
+// engine's compiled code is made of. Same operations as exec_sse().
+#define DEF_SD(name, EXPR) \
+HANDLER(h_##name##sd_x_x) { \
+    (void) c; \
+    double x = cpu->xmm[in->reg].f64[0], y = cpu->xmm[in->rm].f64[0]; \
+    (void) x; \
+    cpu->xmm[in->reg].f64[0] = (EXPR); \
+    NEXT; \
+} \
+HANDLER(h_##name##sd_x_m) { \
+    uint64_t v = mrd(c, ea_fast(cpu, in), 8); \
+    double x = cpu->xmm[in->reg].f64[0], y; \
+    (void) x; \
+    memcpy(&y, &v, 8); \
+    cpu->xmm[in->reg].f64[0] = (EXPR); \
+    NEXT; \
+}
+DEF_SD(add, nd(x + y, x, y))
+DEF_SD(mul, nd(x * y, x, y))
+DEF_SD(sub, nd(x - y, x, y))
+DEF_SD(div, nd(x / y, x, y))
+DEF_SD(sqrt, nd(__builtin_sqrt(y), y, y))
+HANDLER(h_comisd_x_x) {
+    sse_compare(c, cpu->xmm[in->reg].f64[0], cpu->xmm[in->rm].f64[0]);
+    NEXT;
+}
+HANDLER(h_comisd_x_m) {
+    uint64_t v = mrd(c, ea_fast(cpu, in), 8);
+    double y;
+    memcpy(&y, &v, 8);
+    sse_compare(c, cpu->xmm[in->reg].f64[0], y);
+    NEXT;
+}
+HANDLER(h_cvtsi2sd_r4) { (void) c; cpu->xmm[in->reg].f64[0] = (double) (int32_t) cpu->regs[in->rm]; NEXT; }
+HANDLER(h_cvtsi2sd_r8) { (void) c; cpu->xmm[in->reg].f64[0] = (double) (int64_t) cpu->regs[in->rm]; NEXT; }
+HANDLER(h_cvtsi2sd_m4) { cpu->xmm[in->reg].f64[0] = (double) (int32_t) mrd(c, ea_fast(cpu, in), 4); NEXT; }
+HANDLER(h_cvtsi2sd_m8) { cpu->xmm[in->reg].f64[0] = (double) (int64_t) mrd(c, ea_fast(cpu, in), 8); NEXT; }
+HANDLER(h_cvttsd2si_r4) { (void) c; cpu->regs[in->reg] = (uint32_t) f2i32(cpu->xmm[in->rm].f64[0], true); NEXT; }
+HANDLER(h_cvttsd2si_r8) { (void) c; cpu->regs[in->reg] = (uint64_t) f2i64(cpu->xmm[in->rm].f64[0], true); NEXT; }
+HANDLER(h_movsd_x_x) { (void) c; cpu->xmm[in->reg].qw[0] = cpu->xmm[in->rm].qw[0]; NEXT; }
+HANDLER(h_movsd_xrm_x) { (void) c; cpu->xmm[in->rm].qw[0] = cpu->xmm[in->reg].qw[0]; NEXT; }
+HANDLER(h_movq_x_r4) { (void) c; cpu->xmm[in->reg].qw[0] = (uint32_t) cpu->regs[in->rm]; cpu->xmm[in->reg].qw[1] = 0; NEXT; }
+HANDLER(h_movq_x_r8) { (void) c; cpu->xmm[in->reg].qw[0] = cpu->regs[in->rm]; cpu->xmm[in->reg].qw[1] = 0; NEXT; }
+HANDLER(h_movq_r_x4) { (void) c; cpu->regs[in->rm] = cpu->xmm[in->reg].u32[0]; NEXT; }
+HANDLER(h_movq_r_x8) { (void) c; cpu->regs[in->rm] = cpu->xmm[in->reg].qw[0]; NEXT; }
+HANDLER(h_movq_x_x) { (void) c; cpu->xmm[in->reg].qw[0] = cpu->xmm[in->rm].qw[0]; cpu->xmm[in->reg].qw[1] = 0; NEXT; }
+HANDLER(h_sahf) {
+    uint32_t f = flags_save(c);
+    f = (f & ~0xd5u) | (cpu->ah & 0xd5);
+    flags_load(c, f);
+    NEXT;
+}
+
 // ---------------------------------------------------------------- handler selection
 
 static handler_t pick_handler(struct insn *in) {
@@ -643,12 +697,34 @@ static handler_t pick_handler(struct insn *in) {
             if (pfx_simd & (P_F2 | P_F3)) break;
             if (mem) return h_xmov_m_x16;
             break;
+        case 0x158: if (pfx_simd == P_F2) return mem ? h_addsd_x_m : h_addsd_x_x; break;
+        case 0x159: if (pfx_simd == P_F2) return mem ? h_mulsd_x_m : h_mulsd_x_x; break;
+        case 0x15c: if (pfx_simd == P_F2) return mem ? h_subsd_x_m : h_subsd_x_x; break;
+        case 0x15e: if (pfx_simd == P_F2) return mem ? h_divsd_x_m : h_divsd_x_x; break;
+        case 0x151: if (pfx_simd == P_F2) return mem ? h_sqrtsd_x_m : h_sqrtsd_x_x; break;
+        case 0x12e: case 0x12f:
+            if (pfx_simd == P_66) return mem ? h_comisd_x_m : h_comisd_x_x;
+            break;
+        case 0x12a:
+            if (pfx_simd != P_F2) break;
+            if (sz == 8) return mem ? h_cvtsi2sd_m8 : h_cvtsi2sd_r8;
+            return mem ? h_cvtsi2sd_m4 : h_cvtsi2sd_r4;
+        case 0x12c:
+            if (pfx_simd != P_F2 || mem) break;
+            return sz == 8 ? h_cvttsd2si_r8 : h_cvttsd2si_r4;
+        case 0x16e:
+            if (pfx_simd != P_66 || mem) break;
+            return sz == 8 ? h_movq_x_r8 : h_movq_x_r4;
+        case 0x9e:
+            return h_sahf;
         case 0x110: // movups/movupd/movss/movsd load
+            if (!mem && pfx_simd == P_F2) return h_movsd_x_x;
             if (!mem) break;
             if (pfx_simd & P_F2) return h_xmov_x_m8;
             if (pfx_simd & P_F3) return h_xmov_x_m4;
             return h_xmov_x_m16;
         case 0x111:
+            if (!mem && pfx_simd == P_F2) return h_movsd_xrm_x;
             if (!mem) break;
             if (pfx_simd & P_F2) return h_xmov_m_x8;
             if (pfx_simd & P_F3) return h_xmov_m_x4;
@@ -661,7 +737,8 @@ static handler_t pick_handler(struct insn *in) {
             if (mem) return h_xmov_m_x16;
             break;
         case 0x17e:
-            if (pfx_simd == P_F3 && mem) return h_xmov_x_m8;
+            if (pfx_simd == P_F3) return mem ? h_xmov_x_m8 : h_movq_x_x;
+            if (pfx_simd == P_66 && !mem) return sz == 8 ? h_movq_r_x8 : h_movq_r_x4;
             break;
         case 0x1d6:
             if (pfx_simd == P_66 && mem) return h_xmov_m_x8;
