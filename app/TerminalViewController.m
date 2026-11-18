@@ -30,6 +30,9 @@
 @property CGRect lastKeyboardScreenFrame;
 @property (weak) UIScreen *lastKeyboardScreen;
 @property BOOL haveKeyboardFrame;
+// iOS 15 and later: the terminal's bottom edge follows the system's keyboard
+// layout guide instead of a pad worked out from keyboard frames.
+@property (nonatomic) NSLayoutConstraint *keyboardGuideConstraint;
 
 @property (weak, nonatomic) IBOutlet UIButton *tabKey;
 @property (weak, nonatomic) IBOutlet UIButton *controlKey;
@@ -78,6 +81,15 @@
 
     self.terminal = self.terminal;
     [self.termView becomeFirstResponder];
+
+    if (@available(iOS 15.0, *)) {
+        // The system keeps this guide right for docked, split, floating and
+        // hardware keyboards, and through rotation and window resizing.
+        NSLayoutConstraint *old = self.bottomConstraint;
+        old.active = NO;
+        self.keyboardGuideConstraint = [self.termView.bottomAnchor constraintEqualToAnchor:self.view.keyboardLayoutGuide.topAnchor];
+        self.keyboardGuideConstraint.active = YES;
+    }
 
     NSNotificationCenter *center = [NSNotificationCenter defaultCenter];
     [center addObserver:self
@@ -354,13 +366,40 @@
     // truly floating. In the former case we want to keep the pad, but in the
     // latter we should fall back to the input accessory view instead of the
     // keyboard.
-    if (pad != keyboardFrame.size.height && keyboardFrame.size.width != UIScreen.mainScreen.bounds.size.width) {
+    BOOL undocked = pad != keyboardFrame.size.height && keyboardFrame.size.width != UIScreen.mainScreen.bounds.size.width;
+    if (undocked) {
         pad = MAX(self.view.safeAreaInsets.bottom, self.termView.inputAccessoryView.frame.size.height);
     }
     if (pad < 0)
         pad = 0;
+    if (self.keyboardGuideConstraint != nil) {
+        // The guide does the work; this method only kept track of the
+        // external keyboard above.
+        [self liftTerminalAboveBar];
+        return NO;
+    }
     *padOut = pad;
     return YES;
+}
+
+// The keyboard layout guide may or may not count the bar of extra keys (it
+// does not on iOS 26). When the bar sits right on top of the guide, end the
+// terminal at the top of the bar instead of underneath it.
+- (void)liftTerminalAboveBar {
+    if (@available(iOS 15.0, *)) {
+        if (self.keyboardGuideConstraint == nil)
+            return;
+        CGFloat lift = 0;
+        UIView *bar = self.termView.inputAccessoryView;
+        if (bar != nil && bar.window != nil && self.view.window != nil) {
+            CGRect barFrame = [bar convertRect:bar.bounds toCoordinateSpace:self.view];
+            CGFloat guideTop = CGRectGetMinY(self.view.keyboardLayoutGuide.layoutFrame);
+            if (CGRectGetMinY(barFrame) < guideTop - 0.5 && fabs(CGRectGetMaxY(barFrame) - guideTop) < 12)
+                lift = guideTop - CGRectGetMinY(barFrame);
+        }
+        if (fabs(self.keyboardGuideConstraint.constant + lift) > 0.5)
+            self.keyboardGuideConstraint.constant = -lift;
+    }
 }
 
 // A keyboard notification that arrives in the middle of a rotation is measured
@@ -371,6 +410,7 @@
     [super viewDidLayoutSubviews];
     if (self.ignoreKeyboardMotion)
         return;
+    [self liftTerminalAboveBar];
     CGFloat pad;
     if ([self bottomPadForKeyboard:&pad] && fabs(self.bottomConstraint.constant - pad) > 0.5) {
         self.bottomConstraint.constant = pad;
