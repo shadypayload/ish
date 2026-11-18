@@ -207,7 +207,7 @@ HANDLER(h_##name##_mi##SZ) { /* [mem] op= imm */ \
     NEXT; \
 }
 
-#define DEF_ALU_SIZES(name, OP) DEF_ALU(name, OP, 1) DEF_ALU(name, OP, 4) DEF_ALU(name, OP, 8)
+#define DEF_ALU_SIZES(name, OP) DEF_ALU(name, OP, 1) DEF_ALU(name, OP, 4) DEF_ALU(name, OP, 8) DEF_ALU(name, OP, 2)
 DEF_ALU_SIZES(add, ALU_ADD)
 DEF_ALU_SIZES(or, ALU_OR)
 DEF_ALU_SIZES(and, ALU_AND)
@@ -218,9 +218,9 @@ DEF_ALU_SIZES(test, ALU_TEST)
 
 enum { F_RR, F_GR, F_GM, F_MG, F_RI, F_MI, F_COUNT };
 #define ALU_ROW(name, SZ) {h_##name##_rr##SZ, h_##name##_gr##SZ, h_##name##_gm##SZ, h_##name##_mg##SZ, h_##name##_ri##SZ, h_##name##_mi##SZ}
-#define ALU_ROWS(name) {ALU_ROW(name, 1), ALU_ROW(name, 4), ALU_ROW(name, 8)}
+#define ALU_ROWS(name) {ALU_ROW(name, 1), ALU_ROW(name, 4), ALU_ROW(name, 8), ALU_ROW(name, 2)}
 typedef insn_fn handler_t;
-static const handler_t alu_handlers[9][3][F_COUNT] = {
+static const handler_t alu_handlers[9][4][F_COUNT] = {
     [ALU_ADD] = ALU_ROWS(add),
     [ALU_OR] = ALU_ROWS(or),
     [ALU_AND] = ALU_ROWS(and),
@@ -546,16 +546,21 @@ static handler_t pick_handler(struct insn *in) {
     bool mem = in->mod != 3;
     int sz = in->opsz;
     // handlers use ea_fast and non-atomic memory updates
-    if (in->pfx & (P_ADDR32 | P_LOCK | P_FS | P_GS))
+    unsigned slow_pfx = in->pfx & (P_ADDR32 | P_LOCK | P_FS | P_GS);
+    // (an address-size prefix on a direct call or jump is padding: linkers
+    // put it on calls to __tls_get_addr)
+    bool rel_branch = op == 0xe8 || op == 0xe9 || op == 0xeb || (op >= 0x70 && op <= 0x7f) || (op >= 0x180 && op <= 0x18f);
+    if (slow_pfx && !(rel_branch && slow_pfx == P_ADDR32))
         return h_generic;
     int szi = sz == 8 ? 2 : sz == 4 ? 1 : -1;
+    int szi2 = sz == 2 ? 3 : szi; // for the arithmetic handlers, which also exist for 16 bits
     int pfx_simd = in->pfx & (P_66 | P_F2 | P_F3);
 
     if (op < 0x40 && (op & 7) < 6) {
         int alu = (op >> 3) & 7, form = op & 7;
         if (alu == ALU_ADC || alu == ALU_SBB)
             return h_generic;
-        int si = (form & 1) ? szi : 0;
+        int si = (form & 1) ? szi2 : 0;
         if (si < 0)
             return h_generic;
         switch (form >> 1) {
@@ -581,23 +586,23 @@ static handler_t pick_handler(struct insn *in) {
             break;
         case 0x80: case 0x81: case 0x83: {
             int alu = in->reg & 7;
-            int si = op == 0x80 ? 0 : szi;
+            int si = op == 0x80 ? 0 : szi2;
             if (alu == ALU_ADC || alu == ALU_SBB || si < 0)
                 break;
             return alu_handlers[alu][si][mem ? F_MI : F_RI];
         }
         case 0x84: case 0x85: {
-            int si = op == 0x84 ? 0 : szi;
+            int si = op == 0x84 ? 0 : szi2;
             if (si < 0) break;
             return alu_handlers[ALU_TEST][si][mem ? F_MG : F_RR];
         }
         case 0xa8: case 0xa9: {
-            int si = op == 0xa8 ? 0 : szi;
+            int si = op == 0xa8 ? 0 : szi2;
             if (si < 0) break;
             return alu_handlers[ALU_TEST][si][F_RI];
         }
         case 0xf6: case 0xf7: {
-            int si = op == 0xf6 ? 0 : szi;
+            int si = op == 0xf6 ? 0 : szi2;
             if (op == 0xf7 && !mem && szi >= 0) {
                 if ((in->reg & 7) == 2) return sz == 4 ? h_not_r4 : h_not_r8;
                 if ((in->reg & 7) == 3) return sz == 4 ? h_neg_r4 : h_neg_r8;
