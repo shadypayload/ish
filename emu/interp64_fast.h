@@ -20,6 +20,30 @@
     MUSTTAIL return in->fn(c, in, cpu); \
 } while (0)
 
+// Block chaining. A direct jump whose link is current goes straight to the
+// decoded block at its target; otherwise it returns to the dispatch loop,
+// which finds or builds that block and writes the link. Any change to code
+// (the address space's epoch) makes every link stale at once. CHAIN_MAX
+// bounds how long a thread can stay away from the loop's signal checks.
+#define CHAIN_MAX 64
+#define CHAIN_VIA(holder) do { \
+    const struct insn *h_ = (holder); \
+    if (likely(h_->link_epoch == (uint32_t) __atomic_load_n(&c->space->epoch, __ATOMIC_RELAXED)) && likely(--c->chain_budget > 0)) { \
+        in = (const struct insn *) (uintptr_t) h_->disp; \
+        MUSTTAIL return in->fn(c, in, cpu); \
+    } \
+    c->link_from = (struct insn *) (uintptr_t) h_; \
+    return INT_NONE; \
+} while (0)
+#define CHAIN CHAIN_VIA(in)
+// A call ends its block, so the slot after it is the block's end marker:
+// that slot holds the link to the block at the return address.
+#define RS_PUSH(ret) do { \
+    c->rs_i = (c->rs_i + 1) & (RS_SIZE - 1); \
+    c->rs[c->rs_i].rip = (ret); \
+    c->rs[c->rs_i].slot = (struct insn *) (uintptr_t) (in + 1); \
+} while (0)
+
 HANDLER(h_end) {
     (void) c; (void) in; (void) cpu;
     return INT_NONE;
@@ -210,6 +234,49 @@ HANDLER(h_ror_ri##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 1, SZ, rget(cpu, i
 DEF_SHIFT(4)
 DEF_SHIFT(8)
 
+// shifts by CL, register operand
+#define DEF_SHIFT_CL(SZ) \
+HANDLER(h_shl_rc##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 4, SZ, rget(cpu, in, in->rm, SZ), cpu->cl)); NEXT; } \
+HANDLER(h_shr_rc##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 5, SZ, rget(cpu, in, in->rm, SZ), cpu->cl)); NEXT; } \
+HANDLER(h_sar_rc##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 7, SZ, rget(cpu, in, in->rm, SZ), cpu->cl)); NEXT; } \
+HANDLER(h_rol_rc##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 0, SZ, rget(cpu, in, in->rm, SZ), cpu->cl)); NEXT; } \
+HANDLER(h_ror_rc##SZ) { rset(cpu, in, in->rm, SZ, shift_op(c, 1, SZ, rget(cpu, in, in->rm, SZ), cpu->cl)); NEXT; }
+DEF_SHIFT_CL(4)
+DEF_SHIFT_CL(8)
+
+// not, neg (register); inc, dec (memory); xchg with the accumulator
+#define DEF_UNARY(SZ) \
+HANDLER(h_not_r##SZ) { (void) c; rset(cpu, in, in->rm, SZ, ~rget(cpu, in, in->rm, SZ) & szmask(SZ)); NEXT; } \
+HANDLER(h_neg_r##SZ) { rset(cpu, in, in->rm, SZ, neg_op(c, SZ, rget(cpu, in, in->rm, SZ))); NEXT; } \
+HANDLER(h_inc_m##SZ) { \
+    uint64_t addr = ea_fast(cpu, in); \
+    void *p = wptr(c, addr, SZ); \
+    if (likely(p != NULL)) st(p, SZ, incdec(c, false, SZ, ld(p, SZ))); \
+    else mwr(c, addr, SZ, incdec(c, false, SZ, mrd(c, addr, SZ))); \
+    NEXT; \
+} \
+HANDLER(h_dec_m##SZ) { \
+    uint64_t addr = ea_fast(cpu, in); \
+    void *p = wptr(c, addr, SZ); \
+    if (likely(p != NULL)) st(p, SZ, incdec(c, true, SZ, ld(p, SZ))); \
+    else mwr(c, addr, SZ, incdec(c, true, SZ, mrd(c, addr, SZ))); \
+    NEXT; \
+} \
+HANDLER(h_xchg_a_r##SZ) { \
+    (void) c; \
+    uint64_t a = rget(cpu, in, 0, SZ), b = rget(cpu, in, in->reg, SZ); \
+    rset(cpu, in, 0, SZ, b); \
+    rset(cpu, in, in->reg, SZ, a); \
+    NEXT; \
+}
+DEF_UNARY(4)
+DEF_UNARY(8)
+HANDLER(h_push_m) {
+    uint64_t v = mrd(c, ea_fast(cpu, in), 8);
+    push64(c, v);
+    NEXT;
+}
+
 #define DEF_IMUL(SZ) \
 HANDLER(h_imul_gr##SZ) { rset(cpu, in, in->reg, SZ, imul_op(c, SZ, rget(cpu, in, in->reg, SZ), rget(cpu, in, in->rm, SZ))); NEXT; } \
 HANDLER(h_imul_gm##SZ) { \
@@ -227,7 +294,7 @@ DEF_IMUL(8)
 HANDLER(h_jcc##cc) { \
     if (cond(c, cc)) { \
         cpu->rip += (uint64_t) in->len + (uint64_t) in->imm; \
-        return INT_NONE; \
+        CHAIN; \
     } \
     NEXT; \
 } \
@@ -271,21 +338,25 @@ static const handler_t setcc_handlers[16] = CC_ROW(h_set, _r);
 // ---------------------------------------------------------------- control flow, stack
 
 HANDLER(h_jmp) {
-    (void) c;
     cpu->rip += (uint64_t) in->len + (uint64_t) in->imm;
-    return INT_NONE;
+    CHAIN;
 }
 HANDLER(h_call) {
     uint64_t ret = cpu->rip + in->len;
     push64(c, ret);
+    RS_PUSH(ret);
     cpu->rip = ret + (uint64_t) in->imm;
-    return INT_NONE;
+    CHAIN;
 }
 HANDLER(h_ret) {
-    (void) in;
     uint64_t target = mrd(c, cpu->rsp, 8);
     cpu->rsp += 8;
     cpu->rip = target;
+    unsigned i = c->rs_i;
+    if (likely(c->rs[i].rip == target)) {
+        c->rs_i = (i - 1) & (RS_SIZE - 1);
+        CHAIN_VIA(c->rs[i].slot);
+    }
     return INT_NONE;
 }
 HANDLER(h_jmp_r) {
@@ -299,13 +370,17 @@ HANDLER(h_jmp_m) {
 }
 HANDLER(h_call_r) {
     uint64_t target = cpu->regs[in->rm];
-    push64(c, cpu->rip + in->len);
+    uint64_t ret = cpu->rip + in->len;
+    push64(c, ret);
+    RS_PUSH(ret);
     cpu->rip = target;
     return INT_NONE;
 }
 HANDLER(h_call_m) {
     uint64_t target = mrd(c, ea_fast(cpu, in), 8);
-    push64(c, cpu->rip + in->len);
+    uint64_t ret = cpu->rip + in->len;
+    push64(c, ret);
+    RS_PUSH(ret);
     cpu->rip = target;
     return INT_NONE;
 }
@@ -456,6 +531,10 @@ static handler_t pick_handler(struct insn *in) {
         }
         case 0xf6: case 0xf7: {
             int si = op == 0xf6 ? 0 : szi;
+            if (op == 0xf7 && !mem && szi >= 0) {
+                if ((in->reg & 7) == 2) return sz == 4 ? h_not_r4 : h_not_r8;
+                if ((in->reg & 7) == 3) return sz == 4 ? h_neg_r4 : h_neg_r8;
+            }
             if ((in->reg & 7) > 1 || si < 0) break;
             return alu_handlers[ALU_TEST][si][mem ? F_MI : F_RI];
         }
@@ -475,6 +554,19 @@ static handler_t pick_handler(struct insn *in) {
             if (!mem) break;
             if (sz == 8) return h_lea8;
             if (sz == 4) return h_lea4;
+            break;
+        case 0x91: case 0x92: case 0x93: case 0x94: case 0x95: case 0x96: case 0x97:
+            if (szi >= 0) return sz == 4 ? h_xchg_a_r4 : h_xchg_a_r8;
+            break;
+        case 0xd3:
+            if (mem || szi < 0) break;
+            switch (in->reg & 7) {
+                case 0: return sz == 4 ? h_rol_rc4 : h_rol_rc8;
+                case 1: return sz == 4 ? h_ror_rc4 : h_ror_rc8;
+                case 4: case 6: return sz == 4 ? h_shl_rc4 : h_shl_rc8;
+                case 5: return sz == 4 ? h_shr_rc4 : h_shr_rc8;
+                case 7: return sz == 4 ? h_sar_rc4 : h_sar_rc8;
+            }
             break;
         case 0x90:
             if (in->reg == 0) return h_nop;
@@ -517,8 +609,9 @@ static handler_t pick_handler(struct insn *in) {
         case 0xe9: case 0xeb: return h_jmp;
         case 0xff:
             switch (in->reg & 7) {
-                case 0: if (!mem && szi >= 0) return sz == 4 ? h_inc_r4 : h_inc_r8; break;
-                case 1: if (!mem && szi >= 0) return sz == 4 ? h_dec_r4 : h_dec_r8; break;
+                case 0: if (szi >= 0) return mem ? (sz == 4 ? h_inc_m4 : h_inc_m8) : (sz == 4 ? h_inc_r4 : h_inc_r8); break;
+                case 1: if (szi >= 0) return mem ? (sz == 4 ? h_dec_m4 : h_dec_m8) : (sz == 4 ? h_dec_r4 : h_dec_r8); break;
+                case 6: if (mem) return h_push_m; break;
                 case 2: return mem ? h_call_m : h_call_r;
                 case 4: return mem ? h_jmp_m : h_jmp_r;
             }

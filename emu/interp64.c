@@ -52,9 +52,14 @@ struct insn {
     uint8_t pfx;
     uint8_t mod, reg, rm; // reg and rm include the REX bits; mod == 3 means register
     uint8_t base, index, scale;
+    // Direct jumps and calls: when this equals the address space's epoch,
+    // disp holds a pointer to the decoded block at the target (see CHAIN).
+    uint32_t link_epoch;
 };
+_Static_assert(sizeof(struct insn) == 40, "struct insn grew");
 
 #define WLOG_MAX 8
+#define RS_SIZE 16
 struct wlog {
     uint64_t addr;
     unsigned size;
@@ -65,6 +70,16 @@ struct ictx {
     struct cpu_state *cpu;
     struct tlb *tlb;
     struct space *space;
+    // block chaining: the jump that just left its block without a usable
+    // link, and how many more linked jumps may be followed before going back
+    // to the dispatch loop
+    struct insn *link_from;
+    int chain_budget;
+    // return prediction: the last calls' return addresses, each with the end
+    // slot of the calling block, which holds the link to the block at that
+    // return address
+    unsigned rs_i;
+    struct { uint64_t rip; struct insn *slot; } rs[RS_SIZE];
     // Flags are kept as the values they are derived from:
     uint64_t zr; // ZF = (zr == 0)
     int64_t sn;  // SF = (sn < 0)
@@ -152,6 +167,9 @@ static forceinline void setszp(struct ictx *c, uint64_t r, int sz) {
 #define GEN_INDEX(page) (((page) ^ ((page) >> GEN_BITS)) & ((1u << GEN_BITS) - 1))
 struct space {
     uint64_t id;
+    // counts every change to gens[]: a link between two blocks is good only
+    // while this has not moved since the link was made
+    uint64_t epoch;
     uint32_t gens[1u << GEN_BITS];
     // which pages instructions were decoded from: one bit per page, in
     // bitmaps of CODE_LEAF_PAGES pages that exist only where there is code
@@ -166,7 +184,17 @@ static forceinline bool space_has_code(const struct space *sp, addr_t addr) {
 }
 
 
-static __attribute__((__noreturn__, noinline)) void fault(struct ictx *c, uint64_t addr, bool write) {
+// Slow paths that the per-instruction handlers call but almost never take.
+// With the ordinary calling convention each such call makes the handler save
+// and restore five or six registers on every execution, taken or not.
+// preserve_most moves that cost into the slow path itself.
+#if defined(__clang__) && (defined(__x86_64__) || defined(__aarch64__))
+#define SLOWPATH __attribute__((noinline, cold, preserve_most))
+#else
+#define SLOWPATH __attribute__((noinline, cold))
+#endif
+
+static __attribute__((__noreturn__, noinline, cold)) void fault(struct ictx *c, uint64_t addr, bool write) {
     struct cpu_state *cpu = c->cpu;
     cpu->segfault_addr64 = 0;
     cpu->segfault_addr = addr;
@@ -175,23 +203,30 @@ static __attribute__((__noreturn__, noinline)) void fault(struct ictx *c, uint64
 }
 
 // host pointer for one guest address, valid up to the end of its page
-static forceinline void *xlat_r(struct ictx *c, uint64_t addr) {
-    void *p = __tlb_read_ptr(c->tlb, (addr_t) addr);
-    if (unlikely(p == NULL))
+static SLOWPATH void *xlat_r_miss(struct ictx *c, uint64_t addr) {
+    void *p = tlb_handle_miss(c->tlb, (addr_t) addr, MEM_READ);
+    if (p == NULL)
         fault(c, addr, false);
     return p;
+}
+static forceinline void *xlat_r(struct ictx *c, uint64_t addr) {
+    struct tlb_entry entry = c->tlb->entries[TLB_INDEX(addr)];
+    if (likely(entry.page == TLB_PAGE(addr)))
+        return (void *) (entry.data_minus_addr + addr);
+    return xlat_r_miss(c, addr);
 }
 // A write to a page instructions were decoded from must be seen every time
 // (self-modifying code, JIT compilers): the miss path tells memory.c, which
 // drops the decoded blocks, and such a page never gets a cached writable TLB
 // entry, so the next write to it takes the miss path again.
-static __attribute__((noinline)) void *xlat_w_miss(struct ictx *c, uint64_t addr) {
+static SLOWPATH void *xlat_w_miss(struct ictx *c, uint64_t addr) {
     void *p = tlb_handle_miss(c->tlb, (addr_t) addr, MEM_WRITE);
     if (p == NULL)
         fault(c, addr, true);
     if (unlikely(space_has_code(c->space, addr))) {
         // (the TLB's own miss path does not report writes; only faults do)
         __atomic_fetch_add(&c->space->gens[GEN_INDEX(PAGE((addr_t) addr))], 1, __ATOMIC_RELAXED);
+        __atomic_fetch_add(&c->space->epoch, 1, __ATOMIC_RELAXED);
         c->tlb->entries[TLB_INDEX(addr)].page_if_writable = TLB_PAGE_EMPTY;
     }
     return p;
@@ -205,7 +240,7 @@ static forceinline void *xlat_w(struct ictx *c, uint64_t addr) {
     return xlat_w_miss(c, addr);
 }
 
-static __attribute__((noinline)) void mread_n(struct ictx *c, uint64_t addr, void *out, unsigned n) {
+static SLOWPATH void mread_n(struct ictx *c, uint64_t addr, void *out, unsigned n) {
     uint8_t *o = out;
     while (n) {
         unsigned chunk = PAGE_SIZE - (addr & (PAGE_SIZE - 1));
@@ -216,7 +251,7 @@ static __attribute__((noinline)) void mread_n(struct ictx *c, uint64_t addr, voi
     }
 }
 
-static __attribute__((noinline)) void wlog_add(struct ictx *c, uint64_t addr, unsigned n) {
+static SLOWPATH void wlog_add(struct ictx *c, uint64_t addr, unsigned n) {
     while (n) {
         unsigned chunk = n > 16 ? 16 : n;
         if (c->nlog == WLOG_MAX) {
@@ -239,7 +274,7 @@ static forceinline void wprobe(struct ictx *c, uint64_t addr, unsigned n) {
         xlat_w(c, p);
 }
 
-static __attribute__((noinline)) void mwrite_n(struct ictx *c, uint64_t addr, const void *in, unsigned n) {
+static SLOWPATH void mwrite_n(struct ictx *c, uint64_t addr, const void *in, unsigned n) {
     const uint8_t *i = in;
     wprobe(c, addr, n);
     if (unlikely(c->log))
@@ -1561,6 +1596,7 @@ static unsigned decode(const uint8_t *p, uint64_t rip, struct insn *in) {
     in->base = in->index = RNONE;
     in->scale = 0;
     in->disp = 0;
+    in->link_epoch = 0;
     in->imm = 0;
     bool riprel = false;
     unsigned fl = optab[op];
@@ -1683,6 +1719,7 @@ static int step(struct ictx *c) {
             fault(c, next_page, false);
     }
     in[1].fn = h_end;
+    in[1].link_epoch = 0;
     if (unlikely(c->log))
         c->last = in[0];
     return in[0].fn(c, in, cpu);
@@ -1711,6 +1748,8 @@ struct bent {
 struct bcache {
     uint64_t space_id;
     uint32_t used;
+    uint32_t flushes; // links must not be written across a flush
+    uint32_t epoch_hi; // links compare 32 bits of the epoch: start over when they wrap
     struct bent *hash;
     struct insn *arena;
 };
@@ -1732,6 +1771,7 @@ static void bcache_flush(struct bcache *bc) {
     for (size_t i = 0; i < (1u << BC_HASH_BITS); i++)
         bc->hash[i].addr = ~0ULL;
     bc->used = 0;
+    bc->flushes++;
 }
 static struct bcache *bcache_get(struct space *sp) {
     static __thread struct bcache *bc;
@@ -1848,6 +1888,7 @@ static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct
     if (gi1 != gi0)
         block_mark_code(c, sp, page + 1);
     out[n].fn = h_end;
+    out[n].link_epoch = 0;
     e->first = bc->used;
     e->n = (uint16_t) n;
     e->gi0 = gi0; e->gi1 = gi1;
@@ -1894,8 +1935,20 @@ static __attribute__((noinline)) int run(struct ictx *c) {
     struct space *sp = (struct space *) cpu->mmu->asbestos;
     struct bcache *bc = bcache_get(sp);
     unsigned executed = 0;
-    for (unsigned blocks = 1; ; blocks++) {
+    unsigned since_poke = 0, since_timer = 0;
+    for (;;) {
         uint64_t rip = cpu->rip;
+        // read before the block is checked: if code changes in between, the
+        // link made below is stale from the start and never followed
+        uint64_t epoch = __atomic_load_n(&sp->epoch, __ATOMIC_RELAXED);
+        if (unlikely((uint32_t) (epoch >> 32) != bc->epoch_hi)) {
+            bcache_flush(bc);
+            bc->epoch_hi = (uint32_t) (epoch >> 32);
+            c->link_from = NULL;
+            for (unsigned i = 0; i < RS_SIZE; i++)
+                c->rs[i].rip = ~0ULL;
+        }
+        uint32_t flushes = bc->flushes;
         struct bent *e = &bc->hash[BC_HASH(rip)];
         if (unlikely(e->addr != rip)) {
             struct bent *e2 = &bc->hash[BC_HASH(rip) ^ 1];
@@ -1907,13 +1960,33 @@ static __attribute__((noinline)) int run(struct ictx *c) {
             e = block_build(c, bc, sp, rip);
         }
         const struct insn *in = bc->arena + e->first;
+        if (c->link_from != NULL) {
+            // the jump that brought us here goes straight to this block from
+            // now on (unless building it emptied the cache the jump was in)
+            if (flushes == bc->flushes && (uint32_t) epoch != 0) {
+                c->link_from->disp = (int64_t) (uintptr_t) in;
+                c->link_from->link_epoch = (uint32_t) epoch;
+            }
+            c->link_from = NULL;
+        }
+        if (unlikely(flushes != bc->flushes)) {
+            // the remembered calling blocks are gone
+            for (unsigned i = 0; i < RS_SIZE; i++)
+                c->rs[i].rip = ~0ULL;
+        }
+        int budget = unlikely(stats_on) ? 1 : CHAIN_MAX; // (statistics count every block)
+        c->chain_budget = budget;
         int interrupt = in->fn(c, in, cpu);
         if (unlikely(interrupt != INT_NONE))
             return interrupt;
-        if (unlikely((blocks & 0xff) == 0)) {
+        unsigned blocks = 1 + (unsigned) (budget - c->chain_budget);
+        since_poke += blocks;
+        if (unlikely(since_poke >= 0x100)) {
+            since_poke = 0;
             if (__atomic_exchange_n(cpu->poked_ptr, false, __ATOMIC_SEQ_CST))
                 return INT_TIMER;
-            if ((blocks & 0x3fff) == 0)
+            since_timer += 0x100;
+            if (since_timer >= 0x4000)
                 return INT_TIMER;
         }
         if (unlikely(stats_on)) {
@@ -1930,6 +2003,12 @@ static void ctx_enter(struct ictx *c, struct cpu_state *cpu, struct tlb *tlb) {
     c->cpu = cpu;
     c->tlb = tlb;
     c->space = (struct space *) cpu->mmu->asbestos;
+    // (single-step mode never follows a link: its budget stays 0)
+    c->link_from = NULL;
+    c->chain_budget = 0;
+    c->rs_i = 0;
+    for (unsigned i = 0; i < RS_SIZE; i++)
+        c->rs[i].rip = ~0ULL;
     c->single = c->log = c->log_overflow = false;
     c->nlog = 0;
     c->undef = 0;
@@ -2003,6 +2082,7 @@ struct asbestos *asbestos_new(struct mmu *mmu) {
     static uint64_t next_id = 1;
     struct space *sp = calloc(1, sizeof(struct space));
     sp->id = __atomic_fetch_add(&next_id, 1, __ATOMIC_SEQ_CST);
+    sp->epoch = 1; // 0 in an instruction means "no link"
     return (struct asbestos *) sp;
 }
 void asbestos_free(struct asbestos *asbestos) {
@@ -2014,4 +2094,5 @@ void asbestos_free(struct asbestos *asbestos) {
 void asbestos_invalidate_page(struct asbestos *asbestos, page_t page) {
     struct space *sp = (struct space *) asbestos;
     __atomic_fetch_add(&sp->gens[GEN_INDEX(page)], 1, __ATOMIC_RELAXED);
+    __atomic_fetch_add(&sp->epoch, 1, __ATOMIC_RELAXED);
 }
