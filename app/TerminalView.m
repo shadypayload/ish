@@ -42,6 +42,8 @@ struct rowcol {
 @property UITextRange *markedRange;
 @property UITextRange *selectedRange;
 
+@property BOOL scrollingToTop;
+
 @property struct rowcol floatingCursor;
 @property CGSize floatingCursorSensitivity;
 @property CGSize actualFloatingCursorSensitivity;
@@ -267,7 +269,32 @@ static NSString *const HANDLERS[] = {@"syncFocus", @"focus", @"newScrollHeight",
     }
 }
 
+// Only the user's own scrolling is sent to the terminal page.
+//
+// This used to send every change of the offset, including the ones the page
+// itself asked for (newScrollTop above) and the ones UIKit makes when the view
+// or its content changes size (rotation, keyboard, a new scroll height) and it
+// clamps the offset to the new range. Such a clamp is worked out from sizes the
+// page may already have left behind; sent back, it moved hterm off the bottom
+// of the buffer. hterm only follows new output while it is at the bottom, so
+// the screen then showed old rows, or the empty space below them, until the
+// next typed key scrolled it down again.
 - (void)scrollViewDidScroll:(UIScrollView *)scrollView {
+    UIGestureRecognizerState pan = scrollView.panGestureRecognizer.state;
+    BOOL byUser = scrollView.isTracking || scrollView.isDragging || scrollView.isDecelerating ||
+        pan == UIGestureRecognizerStateBegan || pan == UIGestureRecognizerStateChanged || self.scrollingToTop;
+    if (!byUser)
+        return;
+    [self.terminal.webView evaluateJavaScript:[NSString stringWithFormat:@"exports.newScrollTop(%f)", scrollView.contentOffset.y] completionHandler:nil];
+}
+
+// A tap on the status bar scrolls to the top with none of the flags above set.
+- (BOOL)scrollViewShouldScrollToTop:(UIScrollView *)scrollView {
+    self.scrollingToTop = YES;
+    return YES;
+}
+- (void)scrollViewDidScrollToTop:(UIScrollView *)scrollView {
+    self.scrollingToTop = NO;
     [self.terminal.webView evaluateJavaScript:[NSString stringWithFormat:@"exports.newScrollTop(%f)", scrollView.contentOffset.y] completionHandler:nil];
 }
 
