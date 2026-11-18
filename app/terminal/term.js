@@ -138,6 +138,23 @@ hterm.ScrollPort.prototype.syncScrollHeight = function() {
 };
 term.scrollPort_.screen_.addEventListener('scroll', syncScroll);
 
+// Stay at the end of the buffer when the view changes height by less than a
+// row. hterm keeps the last row in view through a real resize, but a change
+// too small to alter the row count (the keyboard's bar settling, a safe-area
+// change: 10 points in practice) only moves the end of the scroll range.
+// Left a few points short of it, hterm counts as scrolled back and stops
+// following output: the screen showed old rows, or the blank ones below the
+// text, until the next typed key scrolled down. Only done on a resize, never
+// on a scroll, so a finger can still drag away from the end slowly.
+function snapToEnd() {
+    const screen = term.scrollPort_.screen_;
+    const gap = screen.scrollHeight - screen.clientHeight - screen.scrollTop;
+    if (gap > 0.5 && gap < term.scrollPort_.characterSize.height)
+        term.scrollEnd();
+}
+term.scrollPort_.subscribe('resize', () => setTimeout(snapToEnd, 0));
+window.addEventListener('resize', () => setTimeout(snapToEnd, 0));
+
 exports.updateStyle = ({foregroundColor, backgroundColor, fontFamily, fontSize, colorPaletteOverrides, blinkCursor, cursorShape}) => {
     term.getPrefs().set('background-color', backgroundColor);
     term.getPrefs().set('foreground-color', foregroundColor);
