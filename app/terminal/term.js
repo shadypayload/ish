@@ -66,6 +66,7 @@ let decoder = new TextDecoder();
 exports.write = (data) => {
     term.io.writeUTF16(decoder.decode(lib.codec.stringToCodeUnitArray(data)));
     syncProp('applicationCursor', term.keyboard.applicationCursor);
+    scheduleFollow();
 };
 term.io.sendString = term.io.onVTKeyStroke = (data) => {
     native.sendInput(data);
@@ -109,12 +110,18 @@ term.scrollPort_.onTouch = (e) => {
     Object.defineProperty(e, 'defaultPrevented', {value: true});
 };
 // Scroll to bottom wrapper
-exports.scrollToBottom = () => term.scrollEnd();
+exports.scrollToBottom = () => {
+    following = true;
+    term.scrollEnd();
+    scheduleFollow();
+};
 // Set scroll position
 exports.newScrollTop = (y) => {
     // two lines instead of one because the value you read out of scrollTop can be different from the value you write into it
     term.scrollPort_.screen_.scrollTop = y;
     lastScrollTop = term.scrollPort_.screen_.scrollTop;
+    // the user scrolled: back from the end, or back to it
+    following = gapToEnd() < term.scrollPort_.characterSize.height;
 };
 
 // Send scroll height and position to native code
@@ -135,25 +142,51 @@ const realSyncScrollHeight = hterm.ScrollPort.prototype.syncScrollHeight;
 hterm.ScrollPort.prototype.syncScrollHeight = function() {
     realSyncScrollHeight.call(this);
     syncScroll();
+    scheduleFollow();
 };
 term.scrollPort_.screen_.addEventListener('scroll', syncScroll);
 
-// Stay at the end of the buffer when the view changes height by less than a
-// row. hterm keeps the last row in view through a real resize, but a change
-// too small to alter the row count (the keyboard's bar settling, a safe-area
-// change: 10 points in practice) only moves the end of the scroll range.
-// Left a few points short of it, hterm counts as scrolled back and stops
-// following output: the screen showed old rows, or the blank ones below the
-// text, until the next typed key scrolled down. Only done on a resize, never
-// on a scroll, so a finger can still drag away from the end slowly.
-function snapToEnd() {
+// Following the end of the buffer.
+//
+// hterm follows new output only while it believes it is scrolled to the end,
+// and it loses that belief on its own when the view changes size: a change
+// smaller than a row moves the end without any resize handling, and when the
+// view shrinks in two steps (rotating with the keyboard up) a redraw between
+// the steps measures the new height against the old row count and concludes
+// the page is scrolled back. The screen then stayed on old rows, or on the
+// blank ones below the text, until the next typed key scrolled down.
+//
+// So this file keeps the answer itself. `following` is true until the user
+// scrolls back (newScrollTop from the app, which sends only the user's own
+// scrolling) and true again when they return to the end or type. While it is
+// true, any size change or new output that leaves a gap is closed.
+let following = true;
+function gapToEnd() {
     const screen = term.scrollPort_.screen_;
-    const gap = screen.scrollHeight - screen.clientHeight - screen.scrollTop;
-    if (gap > 0.5 && gap < term.scrollPort_.characterSize.height)
-        term.scrollEnd();
+    return screen.scrollHeight - screen.clientHeight - screen.scrollTop;
 }
-term.scrollPort_.subscribe('resize', () => setTimeout(snapToEnd, 0));
-window.addEventListener('resize', () => setTimeout(snapToEnd, 0));
+function follow() {
+    if (!following || gapToEnd() <= 0.5)
+        return;
+    term.scrollEnd();
+    if (gapToEnd() > 0.5) {
+        // hterm's row count can be behind the page's real height for a moment
+        const screen = term.scrollPort_.screen_;
+        screen.scrollTop = screen.scrollHeight - screen.clientHeight;
+    }
+}
+let followScheduled = false;
+function scheduleFollow() {
+    if (followScheduled)
+        return;
+    followScheduled = true;
+    setTimeout(() => {
+        followScheduled = false;
+        follow();
+    }, 0);
+}
+term.scrollPort_.subscribe('resize', scheduleFollow);
+window.addEventListener('resize', scheduleFollow);
 
 exports.updateStyle = ({foregroundColor, backgroundColor, fontFamily, fontSize, colorPaletteOverrides, blinkCursor, cursorShape}) => {
     term.getPrefs().set('background-color', backgroundColor);
@@ -170,7 +203,10 @@ exports.getCharacterSize = () => {
     return [term.scrollPort_.characterSize.width, term.scrollPort_.characterSize.height];
 };
 
-exports.clearScrollback = () => term.clearScrollback();
+exports.clearScrollback = () => {
+    following = true;
+    term.clearScrollback();
+};
 exports.setUserGesture = () => term.accessibilityReader_.hasUserGesture = true;
 
 hterm.openUrl = (url) => native.openLink(url);

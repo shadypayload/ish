@@ -28,6 +28,20 @@ with sync_playwright() as p:
         page.set_viewport_size({'width': 820, 'height': h}); st(name); out(8); st('  8 more lines of output')
     page.set_viewport_size({'width': 1100, 'height': 400}); st('rotate (real resize)'); out(8); st('  8 more lines')
     page.set_viewport_size({'width': 820, 'height': 709}); st('rotate back'); out(8); st('  8 more lines')
+    # The two-step shrink seen in the simulator (rotating with the keyboard up): the page gets
+    # shorter, a line of output is redrawn at the new height, and only then does the resize event come.
+    def shrink_then_output_then_resize(h1, h2):
+        page.evaluate(f"document.documentElement.style.height='{h1}px'; document.body.style.height='{h1}px'; document.getElementById('terminal').style.height='{h1}px'; window.dispatchEvent(new Event('resize'))")
+        page.wait_for_timeout(120)
+        page.evaluate(f"document.documentElement.style.height='{h2}px'; document.body.style.height='{h2}px'; document.getElementById('terminal').style.height='{h2}px'")
+        out(1); page.wait_for_timeout(300)
+        page.evaluate("window.dispatchEvent(new Event('resize'))")
+    shrink_then_output_then_resize(450, 362); st('shrink in two steps with output in between')
+    out(6); st('  6 more lines of output')
+    shrink_then_output_then_resize(600, 700); st('grow in two steps with output in between')
+    out(6); st('  6 more lines of output')
+    page.evaluate("for (const e of [document.documentElement, document.body, document.getElementById('terminal')]) e.style.height=''; window.dispatchEvent(new Event('resize'))")
+    st('back to the full view'); out(6); st('  6 more lines of output')
     # scrolled up by the user: must stay where it is through a sub-row change and through output
     top = float(page.evaluate("term.scrollPort_.screen_.scrollTop"))
     page.evaluate(f"exports.newScrollTop({top - 300})"); st('user scrolls up 300 px', expect_bottom=False)
