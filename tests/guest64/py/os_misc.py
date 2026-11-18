@@ -89,3 +89,31 @@ regular = open("/tmp/osm/f")
 try: select.epoll().register(regular.fileno()); show("epoll rejects a regular file", False)
 except PermissionError: show("epoll rejects a regular file", True)
 show("poll accepts a regular file", select.select([regular], [], [], 1)[0] != [])
+
+# CPU time accounting across fork and wait
+import threading, time
+def _burn(seconds):
+    start = time.thread_time(); x = 0
+    while time.thread_time() - start < seconds: x += 1
+_ts = [threading.Thread(target=_burn, args=(0.4,)) for _ in range(2)]
+[t.start() for t in _ts]; [t.join() for t in _ts]
+pid = os.fork()
+if pid == 0: os._exit(0)
+_, _, ru = os.wait4(pid, 0)
+show("a forked child does not inherit its parent's exited threads' CPU time", ru.ru_utime + ru.ru_stime < 0.2)
+t0 = os.times()
+pid = os.fork()
+if pid == 0:
+    _burn(0.5); os._exit(0)
+os.waitpid(pid, 0)
+t1 = os.times()
+d = (t1.children_user + t1.children_system) - (t0.children_user + t0.children_system)
+show("times() counts a waited-for child", 0.3 < d < 1.5)
+pid = os.fork()
+if pid == 0:
+    g = os.fork()
+    if g == 0:
+        _burn(0.5); os._exit(0)
+    os.waitpid(g, 0); os._exit(0)
+_, _, ru = os.wait4(pid, 0)
+show("wait4 includes the child's own waited-for children", 0.3 < ru.ru_utime + ru.ru_stime < 1.5)

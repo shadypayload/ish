@@ -282,6 +282,8 @@ static bool reap_if_zombie(struct task *task, struct siginfo_ *info_out, struct 
     info_out->child.status = exit_code;
 
     struct rusage_ rusage = task->group->rusage;
+    // as on Linux, a child's figure includes the children it waited for
+    rusage_add(&rusage, &task->group->children_rusage);
     if (!(options & WNOWAIT_)) {
         lock(&current->group->lock);
         rusage_add(&current->group->children_rusage, &rusage);

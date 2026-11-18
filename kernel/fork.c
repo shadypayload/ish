@@ -51,6 +51,10 @@ static struct tgroup *tgroup_copy(struct tgroup *old_group) {
         group->posix_timers[i] = (struct posix_timer) {};
     }
     group->doing_group_exit = false;
+    // CPU time of this process's exited threads: the new process has none.
+    // (It used to keep the parent's, so a child of a long-running threaded
+    // program reported all of that as its own to wait4 and `time`.)
+    group->rusage = (struct rusage_) {};
     group->children_rusage = (struct rusage_) {};
     cond_init(&group->child_exit);
     cond_init(&group->stopped_cond);

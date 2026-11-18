@@ -32,7 +32,7 @@ r=$(timeout -s KILL 300 $ISHBIN -f $P /bin/sh -c "$(cat py_only.sh)" 2>&1 | md5s
 [ "$r" = "$(cat tests/py_only.md5 2>/dev/null)" ] && ok "python script" || bad "python script (md5 $r)"
 # 5. system behaviors that Python's own OS tests exposed
 n=$(timeout -s KILL 120 $ISHBIN -f $P /usr/bin/python3 - < tests/py/os_misc.py 2>&1 | grep -c "True$")
-[ "$n" = 30 ] && ok "OS behaviors ($n checks)" || bad "OS behaviors ($n of 30)"
+[ "$n" = 33 ] && ok "OS behaviors ($n checks)" || bad "OS behaviors ($n of 33)"
 # 6. JIT compilers: Node running generated code, alone and in six threads (needs a root with node)
 if [ -d alpine64-big ]; then
     N=$PWD/regress-node-$$; cp -a alpine64-big $N
