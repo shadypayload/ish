@@ -33,5 +33,16 @@ r=$(timeout -s KILL 300 $ISHBIN -f $P /bin/sh -c "$(cat py_only.sh)" 2>&1 | md5s
 # 5. system behaviors that Python's own OS tests exposed
 n=$(timeout -s KILL 120 $ISHBIN -f $P /usr/bin/python3 - < tests/py/os_misc.py 2>&1 | grep -c "True$")
 [ "$n" = 30 ] && ok "OS behaviors ($n checks)" || bad "OS behaviors ($n of 30)"
+# 6. JIT compilers: Node running generated code, alone and in six threads (needs a root with node)
+if [ -d alpine64-big ]; then
+    N=$PWD/regress-node-$$; cp -a alpine64-big $N
+    T=$HOME/src/ish64/tests/guest64
+    r=$(timeout -s KILL 2400 $ISHBIN -f $N /bin/sh -c 'export PATH=/usr/local/bin:/usr/bin:/bin; cat > /tmp/t.js; node /tmp/t.js' < $T/jitstress.js 2>&1 | tail -1)
+    [ "$r" = "2233830945" ] && ok "node JIT stress" || bad "node JIT stress: $r"
+    r=$(timeout -s KILL 2400 $ISHBIN -f $N /bin/sh -c 'export PATH=/usr/local/bin:/usr/bin:/bin; cat > /tmp/t.js; node /tmp/t.js' < $T/workers.js 2>&1 | tail -1)
+    [ "$r" = "2748341649,300941309,3196927470,1192551412,1616053237,1416627574 9600" ] && ok "node JIT in six threads" || bad "node workers: $r"
+else
+    N=
+fi
 echo "$which: $fails failed"
-echo "temporary roots left behind (delete them): $W $P"
+echo "temporary roots left behind (delete them): $W $P $N"
