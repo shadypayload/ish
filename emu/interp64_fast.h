@@ -44,6 +44,18 @@
     c->rs[c->rs_i].slot = (struct insn *) (uintptr_t) (in + 1); \
 } while (0)
 
+// Indirect jumps and calls remember their last target in the block's second
+// end slot, with a link to the block there; a different target replaces it.
+#define CHAIN_INDIRECT(target) do { \
+    struct insn *s_ = (struct insn *) (uintptr_t) (in + 2); \
+    if (likely((uint64_t) s_->imm == (target))) \
+        CHAIN_VIA(s_); \
+    s_->imm = (int64_t) (target); \
+    s_->link_epoch = 0; \
+    c->link_from = s_; \
+    return INT_NONE; \
+} while (0)
+
 HANDLER(h_end) {
     (void) c; (void) in; (void) cpu;
     return INT_NONE;
@@ -360,13 +372,14 @@ HANDLER(h_ret) {
     return INT_NONE;
 }
 HANDLER(h_jmp_r) {
-    (void) c;
-    cpu->rip = cpu->regs[in->rm];
-    return INT_NONE;
+    uint64_t target = cpu->regs[in->rm];
+    cpu->rip = target;
+    CHAIN_INDIRECT(target);
 }
 HANDLER(h_jmp_m) {
-    cpu->rip = mrd(c, ea_fast(cpu, in), 8);
-    return INT_NONE;
+    uint64_t target = mrd(c, ea_fast(cpu, in), 8);
+    cpu->rip = target;
+    CHAIN_INDIRECT(target);
 }
 HANDLER(h_call_r) {
     uint64_t target = cpu->regs[in->rm];
@@ -374,7 +387,7 @@ HANDLER(h_call_r) {
     push64(c, ret);
     RS_PUSH(ret);
     cpu->rip = target;
-    return INT_NONE;
+    CHAIN_INDIRECT(target);
 }
 HANDLER(h_call_m) {
     uint64_t target = mrd(c, ea_fast(cpu, in), 8);
@@ -382,7 +395,7 @@ HANDLER(h_call_m) {
     push64(c, ret);
     RS_PUSH(ret);
     cpu->rip = target;
-    return INT_NONE;
+    CHAIN_INDIRECT(target);
 }
 HANDLER(h_push_r) {
     push64(c, cpu->regs[in->reg]);

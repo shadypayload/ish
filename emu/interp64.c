@@ -1700,7 +1700,7 @@ static unsigned decode(const uint8_t *p, uint64_t rip, struct insn *in) {
 static int step(struct ictx *c) {
     struct cpu_state *cpu = c->cpu;
     uint64_t rip = cpu->rip;
-    struct insn in[2];
+    struct insn in[3];
     const uint8_t *p = xlat_r(c, rip);
     unsigned off = rip & (PAGE_SIZE - 1);
     if (likely(off <= PAGE_SIZE - 32)) {
@@ -1720,6 +1720,8 @@ static int step(struct ictx *c) {
     }
     in[1].fn = h_end;
     in[1].link_epoch = 0;
+    in[2] = in[1];
+    in[2].imm = -1;
     if (unlikely(c->log))
         c->last = in[0];
     return in[0].fn(c, in, cpu);
@@ -1836,7 +1838,7 @@ static void block_mark_code(struct ictx *c, struct space *sp, page_t page) {
 
 static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct bcache *bc, struct space *sp, uint64_t rip) {
     stats_builds++;
-    if (bc->used + BLOCK_MAX + 1 > BC_ARENA) {
+    if (bc->used + BLOCK_MAX + 2 > BC_ARENA) {
         bcache_flush(bc);
         stats_flushes++;
     }
@@ -1889,12 +1891,17 @@ static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct
         block_mark_code(c, sp, page + 1);
     out[n].fn = h_end;
     out[n].link_epoch = 0;
+    // a second slot for an indirect jump or call: its last target (imm) and
+    // the link to the block there
+    out[n + 1].fn = h_end;
+    out[n + 1].link_epoch = 0;
+    out[n + 1].imm = -1;
     e->first = bc->used;
     e->n = (uint16_t) n;
     e->gi0 = gi0; e->gi1 = gi1;
     e->gen0 = gen0; e->gen1 = gen1;
     e->addr = rip;
-    bc->used += n + 1;
+    bc->used += n + 2;
     return e;
 }
 
