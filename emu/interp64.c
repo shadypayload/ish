@@ -1853,6 +1853,9 @@ static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct
     e->addr = ~0ULL;
     const uint8_t *p = xlat_r(c, rip);
     page_t page = PAGE((addr_t) rip);
+    // Mark the page as holding code before its generation is read:
+    // asbestos_invalidate_page() skips pages without the mark.
+    block_mark_code(c, sp, page);
     uint16_t gi0 = (uint16_t) GEN_INDEX(page), gi1 = gi0;
     uint32_t gen0 = __atomic_load_n(&sp->gens[gi0], __ATOMIC_RELAXED), gen1 = gen0;
     struct insn *out = bc->arena + bc->used;
@@ -1869,6 +1872,7 @@ static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct
             unsigned avail = PAGE_SIZE - off;
             memcpy(buf, p, avail);
             uint64_t next_page = addr + avail;
+            block_mark_code(c, sp, page + 1);
             gi1 = (uint16_t) GEN_INDEX(page + 1);
             gen1 = __atomic_load_n(&sp->gens[gi1], __ATOMIC_RELAXED);
             const uint8_t *p2 = __tlb_read_ptr(c->tlb, next_page);
@@ -1886,9 +1890,6 @@ static __attribute__((noinline)) struct bent *block_build(struct ictx *c, struct
         if (ends_block(&out[n++]) || n == BLOCK_MAX)
             break;
     }
-    block_mark_code(c, sp, page);
-    if (gi1 != gi0)
-        block_mark_code(c, sp, page + 1);
     out[n].fn = h_end;
     out[n].link_epoch = 0;
     // a second slot for an indirect jump or call: its last target (imm) and
@@ -2100,6 +2101,12 @@ void asbestos_free(struct asbestos *asbestos) {
 }
 void asbestos_invalidate_page(struct asbestos *asbestos, page_t page) {
     struct space *sp = (struct space *) asbestos;
+    // Only pages instructions were decoded from can have blocks to drop.
+    // memory.c calls this for every page it unmaps, remaps or takes a write
+    // fault on; counting those as code changes would break every link
+    // between blocks each time (see epoch).
+    if (likely(!space_has_code(sp, PAGE_ADDR(page))))
+        return;
     __atomic_fetch_add(&sp->gens[GEN_INDEX(page)], 1, __ATOMIC_RELAXED);
     __atomic_fetch_add(&sp->epoch, 1, __ATOMIC_RELAXED);
 }
