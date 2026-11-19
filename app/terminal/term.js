@@ -66,7 +66,7 @@ let decoder = new TextDecoder();
 exports.write = (data) => {
     term.io.writeUTF16(decoder.decode(lib.codec.stringToCodeUnitArray(data)));
     syncProp('applicationCursor', term.keyboard.applicationCursor);
-    scheduleFollow();
+    scheduleFollow(true);
 };
 term.io.sendString = term.io.onVTKeyStroke = (data) => {
     native.sendInput(data);
@@ -112,6 +112,7 @@ term.scrollPort_.onTouch = (e) => {
 // Scroll to bottom wrapper
 exports.scrollToBottom = () => {
     following = true;
+    stuckGap = null;
     term.scrollEnd();
     scheduleFollow();
 };
@@ -121,7 +122,8 @@ exports.newScrollTop = (y) => {
     term.scrollPort_.screen_.scrollTop = y;
     lastScrollTop = term.scrollPort_.screen_.scrollTop;
     // the user scrolled: back from the end, or back to it
-    following = gapToEnd() < term.scrollPort_.characterSize.height;
+    following = gapToEnd() < Math.max(term.scrollPort_.characterSize.height, END_SLACK);
+    stuckGap = null;
 };
 
 // Send scroll height and position to native code
@@ -141,8 +143,11 @@ function syncScroll() {
 const realSyncScrollHeight = hterm.ScrollPort.prototype.syncScrollHeight;
 hterm.ScrollPort.prototype.syncScrollHeight = function() {
     realSyncScrollHeight.call(this);
+    const before = lastScrollHeight;
     syncScroll();
-    scheduleFollow();
+    // (redraws come through here too; only a height that really changed counts)
+    if (lastScrollHeight !== before)
+        scheduleFollow(true);
 };
 term.scrollPort_.screen_.addEventListener('scroll', syncScroll);
 
@@ -161,22 +166,58 @@ term.scrollPort_.screen_.addEventListener('scroll', syncScroll);
 // scrolling) and true again when they return to the end or type. While it is
 // true, any size change or new output that leaves a gap is closed.
 let following = true;
+// Being this close counts as being at the end: scroll offsets are rounded to
+// device pixels, so the last fraction of a point is not always reachable.
+const END_SLACK = 2;
 function gapToEnd() {
     const screen = term.scrollPort_.screen_;
     return screen.scrollHeight - screen.clientHeight - screen.scrollTop;
 }
+// follow() must not be able to keep itself going. hterm redraws after every
+// scroll and each redraw recomputes the scroll height, so anything that
+// reacted to those would run again for as long as a gap stayed open (an
+// earlier version did, 125 times a second). So:
+// - it runs only for something from outside: a resize, output, a real change
+//   of the scroll height, a typed key (never for a redraw or a scroll);
+// - it gives up for good on a gap it could not close, until the gap or the
+//   view's size is different;
+// - and it is capped per second whatever happens.
+let stuckGap = null, stuckHeight = null;
+let followBudget = 12;
+setInterval(() => { followBudget = 12; }, 1000);
 function follow() {
-    if (!following || gapToEnd() <= 0.5)
+    if (!following)
         return;
+    const screen = term.scrollPort_.screen_;
+    let gap = gapToEnd();
+    if (gap <= END_SLACK) {
+        stuckGap = null;
+        return;
+    }
+    if (stuckGap !== null && Math.abs(gap - stuckGap) < 0.5 && stuckHeight === screen.clientHeight)
+        return;
+    if (followBudget <= 0)
+        return;
+    followBudget--;
     term.scrollEnd();
-    if (gapToEnd() > 0.5) {
+    gap = gapToEnd();
+    if (gap > END_SLACK) {
         // hterm's row count can be behind the page's real height for a moment
-        const screen = term.scrollPort_.screen_;
         screen.scrollTop = screen.scrollHeight - screen.clientHeight;
+        gap = gapToEnd();
+    }
+    if (gap > END_SLACK) {
+        stuckGap = gap;
+        stuckHeight = screen.clientHeight;
+    } else {
+        stuckGap = null;
     }
 }
 let followScheduled = false;
-function scheduleFollow() {
+function scheduleFollow(fresh) {
+    // new output or a new size is worth one more try at a gap given up on
+    if (fresh === true)
+        stuckGap = null;
     if (followScheduled)
         return;
     followScheduled = true;
@@ -185,8 +226,8 @@ function scheduleFollow() {
         follow();
     }, 0);
 }
-term.scrollPort_.subscribe('resize', scheduleFollow);
-window.addEventListener('resize', scheduleFollow);
+term.scrollPort_.subscribe('resize', () => scheduleFollow(true));
+window.addEventListener('resize', () => scheduleFollow(true));
 
 exports.updateStyle = ({foregroundColor, backgroundColor, fontFamily, fontSize, colorPaletteOverrides, blinkCursor, cursorShape}) => {
     term.getPrefs().set('background-color', backgroundColor);
