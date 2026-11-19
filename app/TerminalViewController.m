@@ -33,6 +33,8 @@
 // iOS 15 and later: the terminal's bottom edge follows the system's keyboard
 // layout guide instead of a pad worked out from keyboard frames.
 @property (nonatomic) NSLayoutConstraint *keyboardGuideConstraint;
+@property CFAbsoluteTime liftWindowStart;
+@property int liftChanges;
 
 @property (weak, nonatomic) IBOutlet UIButton *tabKey;
 @property (weak, nonatomic) IBOutlet UIButton *controlKey;
@@ -397,8 +399,22 @@
             if (CGRectGetMinY(barFrame) < guideTop - 0.5 && fabs(CGRectGetMaxY(barFrame) - guideTop) < 12)
                 lift = guideTop - CGRectGetMinY(barFrame);
         }
-        if (fabs(self.keyboardGuideConstraint.constant + lift) > 0.5)
+        if (fabs(self.keyboardGuideConstraint.constant + lift) > 0.5) {
+            // This runs inside layout, and changing the constant asks for
+            // another layout. While the keyboard and the bar are moving the
+            // answer can flip from pass to pass, so the number of changes per
+            // second is bounded: a late correction is better than a layout
+            // loop on the main thread.
+            CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+            if (now - self.liftWindowStart > 1) {
+                self.liftWindowStart = now;
+                self.liftChanges = 0;
+            }
+            if (self.liftChanges >= 6)
+                return;
+            self.liftChanges++;
             self.keyboardGuideConstraint.constant = -lift;
+        }
     }
 }
 
@@ -410,7 +426,15 @@
     [super viewDidLayoutSubviews];
     if (self.ignoreKeyboardMotion)
         return;
-    [self liftTerminalAboveBar];
+    if (self.keyboardGuideConstraint != nil) {
+        // The guide follows the keyboard by itself. Do not work the pad out
+        // again here: that also re-decides whether the keyboard is an external
+        // one from a frame that may predate this layout, and a flip of that
+        // answer changes the bar, which changes the keyboard's frame, which
+        // lays this view out again.
+        [self liftTerminalAboveBar];
+        return;
+    }
     CGFloat pad;
     if ([self bottomPadForKeyboard:&pad] && fabs(self.bottomConstraint.constant - pad) > 0.5) {
         self.bottomConstraint.constant = pad;
