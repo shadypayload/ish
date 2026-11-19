@@ -35,6 +35,8 @@
 @property (nonatomic) NSLayoutConstraint *keyboardGuideConstraint;
 @property CFAbsoluteTime liftWindowStart;
 @property int liftChanges;
+@property CFAbsoluteTime externalWindowStart;
+@property int externalChanges;
 
 @property (weak, nonatomic) IBOutlet UIButton *tabKey;
 @property (weak, nonatomic) IBOutlet UIButton *controlKey;
@@ -361,9 +363,35 @@
         keyboardFrame = intersection;
         pad = CGRectGetMaxY(self.view.bounds) - CGRectGetMinY(keyboardFrame);
     }
-    BOOL external = keyboardFrame.size.height < 100;
-    if (external != self.hasExternalKeyboard)
-        self.hasExternalKeyboard = external;
+    // An external keyboard shows as just the bar docked at the bottom: under
+    // 100 points high, as wide as this view, touching its bottom edge. Anything
+    // else under 100 points is not evidence either way and leaves the answer as
+    // it was. In particular a frame from before a rotation, converted into the
+    // new bounds, misses the view or clips it to a strip; that used to read as
+    // "external" for a moment on every rotation, which swapped the bar and
+    // reloaded the input views twice, each reload causing more keyboard
+    // notifications.
+    BOOL external = self.hasExternalKeyboard;
+    if (keyboardFrame.size.height >= 100) {
+        external = NO;
+    } else if (pad > 0 &&
+               fabs(CGRectGetMaxY(keyboardFrame) - CGRectGetMaxY(self.view.bounds)) < 2 &&
+               keyboardFrame.size.width > self.view.bounds.size.width - 2) {
+        external = YES;
+    }
+    if (external != self.hasExternalKeyboard) {
+        // And however the answer comes out, it may not flip-flop: at most 4
+        // changes in 2 seconds, then it holds until things have been quiet.
+        CFAbsoluteTime now = CFAbsoluteTimeGetCurrent();
+        if (now - self.externalWindowStart > 2) {
+            self.externalWindowStart = now;
+            self.externalChanges = 0;
+        }
+        if (self.externalChanges < 4) {
+            self.externalChanges++;
+            self.hasExternalKeyboard = external;
+        }
+    }
     // The keyboard appears to be undocked. This means it can either be split or
     // truly floating. In the former case we want to keep the pad, but in the
     // latter we should fall back to the input accessory view instead of the
