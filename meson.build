@@ -147,6 +147,7 @@ if get_option('kernel') == 'ish'
         'kernel/misc.c',
         'kernel/eventfd.c',
         'kernel/pidfd.c',
+        'kernel/signalfd.c',
         'fs/inotify.c',
         'kernel/ipc.c',
         'kernel/ptrace.c',

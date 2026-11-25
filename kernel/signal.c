@@ -95,6 +95,7 @@ void deliver_signal(struct task *task, int sig, struct siginfo_ info) {
     lock(&task->sighand->lock);
     deliver_signal_unlocked(task, sig, info);
     unlock(&task->sighand->lock);
+    signalfd_notify(sig);
 }
 
 void send_signal(struct task *task, int sig, struct siginfo_ info) {
@@ -110,6 +111,7 @@ void send_signal(struct task *task, int sig, struct siginfo_ info) {
         deliver_signal_unlocked(task, sig, info);
     }
     unlock(&sighand->lock);
+    signalfd_notify(sig);
 
     if (sig == SIGCONT_ || sig == SIGKILL_) {
         lock(&task->group->lock);

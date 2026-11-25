@@ -113,6 +113,9 @@ int_t sys_epoll_pwait(fd_t epoll_f, addr_t events_addr, int_t max_events, int_t 
 int_t sys_eventfd2(uint_t initval, int_t flags);
 int_t sys_eventfd(uint_t initval);
 int_t sys_pidfd_open(pid_t_ pid, uint_t flags);
+int_t sys_signalfd(fd_t f, addr_t mask_addr, uint_t mask_size);
+int_t sys_signalfd4(fd_t f, addr_t mask_addr, uint_t mask_size, int_t flags);
+void signalfd_notify(int sig);
 int_t sys_pidfd_send_signal(fd_t f, int_t sig, addr_t info_addr, uint_t flags);
 void pidfd_notify_exit(pid_t_ pid);
 pid_t_ pidfd_pid(fd_t f, bool *dead);

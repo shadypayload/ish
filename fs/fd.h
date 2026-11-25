@@ -49,6 +49,10 @@ struct fd {
             struct inotify *ino;
         } inotifyfd;
         struct {
+            uint64_t mask; // signals this fd takes; locked by signalfds_lock
+            struct list others; // all signalfds, locked by signalfds_lock
+        } signalfd;
+        struct {
             int domain;
             int type;
             int protocol;
