@@ -2,6 +2,7 @@
 #include <string.h>
 #include "kernel/calls.h"
 #include "platform/platform.h"
+#include "ish_commit.h"
 
 #if __APPLE__
 #include <sys/sysctl.h>
@@ -23,7 +24,8 @@ void do_uname(struct uname *uts) {
     strcpy(uts->system, "Linux");
     strcpy(uts->hostname, hostname);
     strcpy(uts->release, "4.20.69-ish");
-    snprintf(uts->version, sizeof(uts->version), "%s %s %s", uname_version, __DATE__, __TIME__);
+    // the commit says which build this is; the date is when this file was compiled
+    snprintf(uts->version, sizeof(uts->version), "%s %s %s %s", uname_version, ISH_COMMIT, __DATE__, __TIME__);
 #if ISH_GUEST_64
     strcpy(uts->arch, "x86_64");
 #else

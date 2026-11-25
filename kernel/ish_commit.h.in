@@ -1,0 +1,2 @@
+// Filled in by meson (vcs_tag in meson.build).
+#define ISH_COMMIT "@VCS_TAG@"

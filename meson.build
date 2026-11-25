@@ -109,7 +109,17 @@ if get_option('kernel') == 'ish'
         error('Only asbestos is supported with ish kernel')
     endif
 
+    # The commit this build was made from, for uname. vcs_tag reruns on every
+    # build and rewrites the header only when the answer changes, so uname.c
+    # (and its build date) is recompiled whenever the commit does.
+    ish_commit_h = vcs_tag(
+        command: ['git', 'describe', '--always', '--dirty', '--abbrev=8', '--exclude', '*'],
+        input: 'kernel/ish_commit.h.in',
+        output: 'ish_commit.h',
+        fallback: 'unknown')
+
     src = [
+        ish_commit_h,
         'kernel/init.c',
         'kernel/errno.c',
 
