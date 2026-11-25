@@ -1,0 +1,82 @@
+# Builds the iOS app UNSIGNED with a chosen Xcode and uploads it as an
+# artifact. For people whose own Mac cannot run the Xcode that a new device
+# needs: download the artifact, sign it with your own certificate and
+# provisioning profile, and install it.
+name: Unsigned iOS build
+
+on:
+  workflow_dispatch:
+    inputs:
+      xcode:
+        description: Xcode version on the runner (/Applications/Xcode_<version>.app)
+        default: '27.2'
+      guest:
+        description: Guest CPU (x86 or x86_64)
+        default: x86_64
+      bundle_id:
+        description: Root bundle identifier
+        default: com.claude.ish64
+  push:
+    branches: [duo-build]
+
+jobs:
+  build:
+    runs-on: xcode-27
+    timeout-minutes: 60
+    env:
+      XCODE: ${{ inputs.xcode || '27.2' }}
+      GUEST: ${{ inputs.guest || 'x86_64' }}
+      BUNDLE_ID: ${{ inputs.bundle_id || 'com.claude.ish64' }}
+    steps:
+      - uses: actions/checkout@v6
+      - name: Submodules (libapps, libarchive)
+        run: git submodule update --init --depth 1 deps/libapps deps/libarchive
+      - name: Select Xcode
+        run: |
+          ls -d /Applications/Xcode*.app
+          sudo xcode-select -s "/Applications/Xcode_${XCODE}.app"
+          xcodebuild -version
+          xcodebuild -showsdks | grep -i iphoneos
+      - name: Install dependencies
+        run: brew install llvm lld ninja libarchive meson
+      - name: Build
+        run: |
+          set -o pipefail
+          xcodebuild -project iSH.xcodeproj -scheme iSH -configuration Release \
+            -sdk iphoneos -destination generic/platform=iOS -derivedDataPath dd \
+            ARCHS=arm64 ISH_GUEST="$GUEST" ROOT_BUNDLE_IDENTIFIER="$BUNDLE_ID" \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO CODE_SIGN_IDENTITY= \
+            build 2>&1 | tee xcodebuild.log | grep -E 'error|warning: unused|BUILD|^=== |note: Run script' || true
+          tail -5 xcodebuild.log
+          grep -q 'BUILD SUCCEEDED' xcodebuild.log
+      - name: Package
+        run: |
+          app=$(find dd/Build/Products -maxdepth 2 -name 'iSH.app' -type d | head -1)
+          echo "app: $app"
+          mkdir -p out/Payload && cp -R "$app" out/Payload/
+          {
+            echo "commit: $(git rev-parse HEAD)"
+            echo "xcode: $(xcodebuild -version | tr '\n' ' ')"
+            echo "guest: $GUEST"
+            echo "bundle id: $(/usr/libexec/PlistBuddy -c 'Print :CFBundleIdentifier' "$app/Info.plist")"
+            echo "DTXcode: $(/usr/libexec/PlistBuddy -c 'Print :DTXcode' "$app/Info.plist")"
+            echo "DTSDKName: $(/usr/libexec/PlistBuddy -c 'Print :DTSDKName' "$app/Info.plist")"
+            echo "DTPlatformVersion: $(/usr/libexec/PlistBuddy -c 'Print :DTPlatformVersion' "$app/Info.plist")"
+            echo "MinimumOSVersion: $(/usr/libexec/PlistBuddy -c 'Print :MinimumOSVersion' "$app/Info.plist")"
+            echo "--- build version load command"
+            xcrun vtool -show-build "$app/iSH"
+            echo "--- bundles"
+            find "$app" -name '*.appex' -o -name '*.framework' -o -name '*.dylib'
+            echo "--- signature (expected: not signed)"
+            codesign -dv "$app" 2>&1 || true
+          } | tee out/BUILD_INFO.txt
+          (cd out && zip -qry iSH-unsigned.ipa Payload && rm -rf Payload && shasum -a 256 iSH-unsigned.ipa | tee -a BUILD_INFO.txt)
+      - uses: actions/upload-artifact@v4
+        with:
+          name: iSH-unsigned
+          path: out/
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: xcodebuild-log
+          path: xcodebuild.log
