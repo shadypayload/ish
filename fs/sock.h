@@ -184,6 +184,11 @@ static inline int sock_flags_from_real(int real) {
 #define SO_TIMESTAMP_ 29
 #define SO_PROTOCOL_ 38
 #define SO_DOMAIN_ 39
+// 66 and 67 take a timeval with 64-bit fields, which is what a 32-bit musl
+// uses. A 64-bit guest uses the original numbers, 20 and 21, and its timeval
+// has the same 64-bit fields.
+#define SO_RCVTIMEO_OLD_ 20
+#define SO_SNDTIMEO_OLD_ 21
 #define SO_RCVTIMEO_ 66
 #define SO_SNDTIMEO_ 67
 #define IP_TOS_ 1
@@ -194,11 +199,21 @@ static inline int sock_flags_from_real(int real) {
 #define IP_RECVERR_ 11
 #define IP_RECVTTL_ 12
 #define IP_RECVTOS_ 13
+#define IP_MULTICAST_IF_ 32
+#define IP_MULTICAST_TTL_ 33
+#define IP_MULTICAST_LOOP_ 34
+#define IP_ADD_MEMBERSHIP_ 35
+#define IP_DROP_MEMBERSHIP_ 36
 #define TCP_NODELAY_ 1
 #define TCP_DEFER_ACCEPT_ 9
 #define TCP_INFO_ 11
 #define TCP_CONGESTION_ 13
 #define IPV6_UNICAST_HOPS_ 16
+#define IPV6_MULTICAST_IF_ 17
+#define IPV6_MULTICAST_HOPS_ 18
+#define IPV6_MULTICAST_LOOP_ 19
+#define IPV6_ADD_MEMBERSHIP_ 20
+#define IPV6_DROP_MEMBERSHIP_ 21
 #define IPV6_RECVERR_ 25
 #define IPV6_V6ONLY_ 26
 #define IPV6_TCLASS_ 67
@@ -218,6 +233,10 @@ static inline int sock_opt_to_real(int fake, int level) {
             case SO_TIMESTAMP_: return SO_TIMESTAMP;
             case SO_RCVTIMEO_: return SO_RCVTIMEO;
             case SO_SNDTIMEO_: return SO_SNDTIMEO;
+#if ISH_GUEST_64
+            case SO_RCVTIMEO_OLD_: return SO_RCVTIMEO;
+            case SO_SNDTIMEO_OLD_: return SO_SNDTIMEO;
+#endif
         } break;
         case IPPROTO_TCP: switch (fake) {
             case TCP_NODELAY_: return TCP_NODELAY;
@@ -234,12 +253,24 @@ static inline int sock_opt_to_real(int fake, int level) {
             case IP_RETOPTS_: return IP_RETOPTS;
             case IP_RECVTTL_: return IP_RECVTTL;
             case IP_RECVTOS_: return IP_RECVTOS;
+            // multicast (local peer discovery, mDNS): the values and the
+            // ip_mreq/ip_mreqn structures are the same on Linux and Darwin
+            case IP_MULTICAST_IF_: return IP_MULTICAST_IF;
+            case IP_MULTICAST_TTL_: return IP_MULTICAST_TTL;
+            case IP_MULTICAST_LOOP_: return IP_MULTICAST_LOOP;
+            case IP_ADD_MEMBERSHIP_: return IP_ADD_MEMBERSHIP;
+            case IP_DROP_MEMBERSHIP_: return IP_DROP_MEMBERSHIP;
             case IP_RECVERR_: return 0; // no error queue; glibc's resolver sets it and fails the lookup on an error
         } break;
         case IPPROTO_IPV6: switch (fake) {
             case IPV6_UNICAST_HOPS_: return IPV6_UNICAST_HOPS;
             case IPV6_TCLASS_: return IPV6_TCLASS;
             case IPV6_V6ONLY_: return IPV6_V6ONLY;
+            case IPV6_MULTICAST_IF_: return IPV6_MULTICAST_IF;
+            case IPV6_MULTICAST_HOPS_: return IPV6_MULTICAST_HOPS;
+            case IPV6_MULTICAST_LOOP_: return IPV6_MULTICAST_LOOP;
+            case IPV6_ADD_MEMBERSHIP_: return IPV6_JOIN_GROUP;
+            case IPV6_DROP_MEMBERSHIP_: return IPV6_LEAVE_GROUP;
             case IPV6_RECVERR_: return 0; // as IP_RECVERR
         } break;
     }
