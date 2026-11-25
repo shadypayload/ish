@@ -1,4 +1,36 @@
 hterm.defaultStorage = new lib.Storage.Memory();
+
+// The terminal takes a new size only once the view has kept it for a moment.
+//
+// When the view's height changes and comes straight back (the keyboard and the
+// key bar re-laying out, a return from the background), hterm would drop the
+// blank row at the bottom and then pull a row back out of the scrollback: the
+// same size as before, with everything one row lower. The app reads the size
+// after the fact, sees no change, and the program is never told. A program that
+// updates its screen with relative cursor moves (Claude Code) then draws one
+// row off until its next full repaint. A size that lasts is applied and
+// reported as before, at most RESIZE_MAX_WAIT late.
+const RESIZE_SETTLE = 150, RESIZE_MAX_WAIT = 500;
+{
+    const realOnResize = hterm.Terminal.prototype.onResize_;
+    hterm.Terminal.prototype.onResize_ = function() {
+        if (!this.resizeSettled_) {
+            // the first size, at load: nothing to protect yet
+            this.resizeSettled_ = true;
+            return realOnResize.call(this);
+        }
+        const now = Date.now();
+        if (this.resizeTimer_ == null)
+            this.resizeFirst_ = now;
+        else
+            clearTimeout(this.resizeTimer_);
+        const wait = Math.max(0, Math.min(RESIZE_SETTLE, this.resizeFirst_ + RESIZE_MAX_WAIT - now));
+        this.resizeTimer_ = setTimeout(() => {
+            this.resizeTimer_ = null;
+            realOnResize.call(this);
+        }, wait);
+    };
+}
 window.onload = async function() {
     await lib.init();
     window.term = new hterm.Terminal();

@@ -12,3 +12,6 @@ Setup, once:
 - `python3 /tmp/termtest/subrow.py`: the terminal must stay at the end of the buffer, and keep
   following output, when the view's height changes by less than one row; it must stay put
   when the user has scrolled back.
+- `python3 /tmp/termtest/flip.py`: a view height (or width) that changes and comes straight back
+  must leave the screen, the cursor row and the scrollback exactly as they were and report
+  nothing to the app; a height that lasts must still be applied and reported.
